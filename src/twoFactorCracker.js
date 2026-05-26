@@ -27,7 +27,11 @@ export async function probe2FA(gamePin, io) {
       reject(new Error("Probe timed out"));
     }, 15000);
 
-    scout.join(gamePin, `Scout_${Math.floor(Math.random() * 10000)}`).catch(reject);
+    scout.join(gamePin, `Scout_${Math.floor(Math.random() * 90000) + 10000}`)
+      .catch((err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
 
     scout.on("Joined", (settings) => {
       clearTimeout(timeout);
@@ -47,7 +51,11 @@ export async function probe2FA(gamePin, io) {
 
 /**
  * Launches a 24-bot swarm to brute-force the 2FA sequence.
- * Returns the correct sequence array, or null on timeout (NEVER rejects).
+ * Each bot tries exactly ONE permutation. On TwoFactorReset (code rotation),
+ * the bot does NOT retry the same perm — the code has changed so the old
+ * answer is guaranteed wrong. Instead we let the other swarm bots handle it.
+ * 
+ * Returns the correct sequence array, or null on timeout.
  */
 export async function crack2FA(gamePin, io) {
   io.emit("log", { type: "warn", msg: "[!] Starte 2FA Brute-Force Swarm (24 Bots)..." });
@@ -56,19 +64,20 @@ export async function crack2FA(gamePin, io) {
   const swarmBots = [];
   let cracked = false;
   let timedOut = false;
+  let joinedSoFar = 0;
 
   return new Promise((resolve) => {
-    // ── Safety timeout — resolves null, NEVER rejects to prevent server crash ──
+    // Safety timeout — resolves null, NEVER rejects
     const timeout = setTimeout(() => {
       if (cracked) return;
       timedOut = true;
       cleanupSwarm(swarmBots);
       io.emit("log", { type: "error", msg: "[-] 2FA Swarm Timeout (60s). Kein Code gefunden." });
       io.emit("tfaStatus", { phase: "error" });
-      resolve(null); // safe — callers handle null
+      resolve(null);
     }, 60000);
 
-    // ── Spawn all 24 swarm bots asynchronously ──
+    // Spawn all 24 swarm bots with staggered delays
     (async () => {
       for (let i = 0; i < ALL_PERMS.length; i++) {
         if (cracked || timedOut) break;
@@ -78,29 +87,28 @@ export async function crack2FA(gamePin, io) {
         bot.loggingMode = false;
         swarmBots.push(bot);
 
-        const botName = `Crack_${Math.floor(Math.random() * 10000)}_${i}`;
+        const botName = `Crack_${Math.floor(Math.random() * 90000) + 10000}`;
+
+        // Attempt join — don't let errors crash the loop
         bot.join(gamePin, botName).catch(() => { });
 
         bot.on("Joined", (settings) => {
-          io.emit("tfaStatus", { phase: "cracking", progress: swarmBots.length, total: 24 });
+          joinedSoFar++;
+          io.emit("tfaStatus", { phase: "cracking", progress: joinedSoFar, total: 24 });
+
           if (settings.twoFactorAuth && !cracked && !timedOut) {
-            // Human-like delay before answering
-            setTimeout(() => {
-              if (!cracked && !timedOut) {
-                bot.answerTwoFactorAuth(perm).catch(() => { });
-              }
-            }, 1000 + Math.random() * 1000);
+            // Answer IMMEDIATELY — the library already has a built-in
+            // 250ms cooldown, no need for extra delay. Extra delay causes
+            // the code to rotate before our answer arrives.
+            bot.answerTwoFactorAuth(perm).catch(() => { });
           }
         });
 
+        // On TwoFactorReset: code rotated, our perm is now wrong.
+        // Do NOT retry — let other swarm bots with different perms handle it.
+        // This prevents the infinite retry-same-wrong-answer loop.
         bot.on("TwoFactorReset", () => {
-          if (!cracked && !timedOut) {
-            setTimeout(() => {
-              if (!cracked && !timedOut) {
-                bot.answerTwoFactorAuth(perm).catch(() => { });
-              }
-            }, 1000 + Math.random() * 1000);
-          }
+          // Intentionally empty — don't retry same perm
         });
 
         bot.on("TwoFactorCorrect", () => {
@@ -111,14 +119,30 @@ export async function crack2FA(gamePin, io) {
           io.emit("log", { type: "success", msg: `[+] 2FA GEKNACKT! Sequenz: [${perm}]` });
           io.emit("tfaStatus", { phase: "cracked", sequence: perm });
 
-          cleanupSwarm(swarmBots);
+          // Clean up OTHER swarm bots, but not the winner
+          for (const b of swarmBots) {
+            if (b !== bot) {
+              try { b.leave(); } catch { }
+            }
+          }
+          // Leave the winner too after a short delay
+          setTimeout(() => {
+            try { bot.leave(); } catch { }
+          }, 1000);
+
           resolve(perm);
         });
 
-        await delay(200);
+        bot.on("TwoFactorWrong", () => {
+          // Wrong answer — this perm doesn't match. Do nothing,
+          // the bot will get a TwoFactorReset and we intentionally
+          // don't retry.
+        });
+
+        // Stagger: 500ms between each swarm bot to avoid rate limiting
+        await delay(500);
       }
     })().catch((err) => {
-      // Inner async loop should never throw, but if it does — resolve safely
       if (!cracked && !timedOut) {
         io.emit("log", { type: "error", msg: `[-] Interner Swarm-Fehler: ${err.message}` });
         resolve(null);

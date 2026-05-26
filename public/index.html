@@ -109,7 +109,7 @@
           ▶ Start
         </button>
         <button class="btn btn-recrack" id="btnRecrack" onclick="handleRecrack()" disabled>
-          Bypass 2FA
+          🐝 Swarm
         </button>
         <button class="btn btn-stop" id="btnStop" onclick="handleStop()" disabled>
           ⏹ Stop
@@ -338,8 +338,11 @@
       }
 
       const statusLabels = {
+        waiting: 'Warten',
         joining: 'Joining',
+        '2fa': '2FA...',
         ingame: 'Im Spiel',
+        retry: 'Retry',
         error: 'Fehler',
         '2fa_failed': '2FA Fehler',
         disconnected: 'Offline'
