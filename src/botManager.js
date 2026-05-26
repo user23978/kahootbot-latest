@@ -1,5 +1,5 @@
 import Kahoot from "kahoot.js-latest";
-import { probe2FA, crack2FA } from "./twoFactorCracker.js";
+import { probe2FA, crack2FA, abortSwarm, killScout } from "./twoFactorCracker.js";
 import { generateRandomName } from "./names.js";
 
 // ── State ──
@@ -7,12 +7,13 @@ let bots = [];
 let running = false;
 let currentSequence = null;
 let globalGamePin = null;
-let globalJoinDelay = 200;
+let globalJoinDelay = 2000;
 let resolvedNames = [];
 let joinedCount = 0;
 let failedCount = 0;
 let totalCount = 0;
 let swarmActive = false;
+let swarmLoopId = null;
 let _io = null;
 let _answerMode = "random";
 
@@ -29,60 +30,120 @@ export function getState() {
       name: b._botName || `bot_${i}`,
       status: b._status || "unknown"
     })),
-    currentSequence
+    currentSequence,
+    swarmActive
   };
 }
 
 export async function stopBots(io) {
   running = false;
   swarmActive = false;
+  swarmLoopId = null;
+  abortSwarm();
 
-  for (const bot of bots) {
-    try { if (typeof bot.leave === "function") bot.leave(); } catch { }
+  const toKill = bots;
+  bots = [];
+  for (const bot of toKill) {
+    try { if (typeof bot.leave === "function") bot.leave(); } catch {}
+    try { if (bot.socket) bot.socket.close(); } catch {}
   }
 
-  const count = bots.length;
-  bots = [];
   currentSequence = null;
   joinedCount = 0;
   failedCount = 0;
   totalCount = 0;
 
-  io.emit("log", { type: "success", msg: `${count} Bots getrennt.` });
+  io.emit("log", { type: "success", msg: `${toKill.length} bots disconnected.` });
   io.emit("state", getState());
 }
 
+export async function disconnectAll(io) {
+  // Stop everything: scout, swarm, deployed bots
+  running = false;
+  swarmActive = false;
+  swarmLoopId = null;
+  abortSwarm();
+  killScout();
+
+  const toKill = bots;
+  bots = [];
+  for (const bot of toKill) {
+    try { if (typeof bot.leave === "function") bot.leave(); } catch {}
+    try { if (bot.socket) bot.socket.close(); } catch {}
+  }
+  // Safety: force-close any lingering sockets after 1s
+  setTimeout(() => {
+    for (const bot of toKill) {
+      try { if (bot.socket) bot.socket.close(); } catch {}
+    }
+  }, 1000);
+
+  currentSequence = null;
+  joinedCount = 0;
+  failedCount = 0;
+  totalCount = 0;
+  globalGamePin = null;
+
+  io.emit("log", { type: "success", msg: `Disconnected everything (${toKill.length} bots + scout).` });
+  io.emit("state", getState());
+  io.emit("tfaStatus", { phase: "idle" });
+  io.emit("botUpdate", { index: "scout", name: "Scout", status: "remove" });
+}
+
+/**
+ * Toggle the swarm cracking loop on/off.
+ */
 export async function toggleSwarm(io) {
-  if (!running || !globalGamePin) return;
+  if (!globalGamePin) return;
 
   // If already active, stop it
   if (swarmActive) {
     swarmActive = false;
-    io.emit("log", { type: "info", msg: "[i] Swarm cracking stopped." });
+    const oldId = swarmLoopId;
+    swarmLoopId = null;
+    abortSwarm();
+    io.emit("log", { type: "info", msg: "[i] Swarm stopped." });
+    io.emit("tfaStatus", { phase: "probed", has2FA: true }); // Back to "ready to crack" state
+    io.emit("state", getState());
     return;
   }
 
   // Start swarm cracking loop
   swarmActive = true;
+  const myLoopId = Symbol();
+  swarmLoopId = myLoopId;
   io.emit("log", { type: "info", msg: "[i] Swarm cracking started..." });
+  io.emit("state", getState());
 
-  while (swarmActive && running && !currentSequence) {
+  while (swarmActive && swarmLoopId === myLoopId && !currentSequence) {
     const seq = await crack2FA(globalGamePin, io);
-    if (seq && running) {
-      forceSetSequence(seq, io);
+
+    // Check if we were cancelled while cracking
+    if (swarmLoopId !== myLoopId) break;
+
+    if (seq) {
+      currentSequence = seq;
+      io.emit("log", { type: "success", msg: `[+] 2FA code: [${seq}] — Ready for deployment!` });
       swarmActive = false;
+      io.emit("state", getState());
+
+      // Auto-resume paused deployment
+      if (running === "paused") {
+        resumeDeployment(io).catch(() => { });
+      }
       break;
     }
-    if (!swarmActive || !running) break;
-    // Wait before next attempt
-    io.emit("log", { type: "warn", msg: "[i] Retrying swarm crack in 3s..." });
+
+    if (!swarmActive || swarmLoopId !== myLoopId) break;
+
+    io.emit("log", { type: "warn", msg: "[i] Retrying swarm in 3s..." });
     await delay(3000);
   }
 
-  if (!currentSequence && swarmActive) {
-    io.emit("log", { type: "warn", msg: "[i] Swarm stopped without obtaining a code." });
+  if (swarmLoopId === myLoopId) {
+    swarmActive = false;
+    io.emit("state", getState());
   }
-  swarmActive = false;
 }
 
 export async function forceRecrack(io) {
@@ -96,27 +157,130 @@ export async function forceRecrack(io) {
   }
 }
 
+export function setGlobalPin(pin) {
+  globalGamePin = pin;
+}
+
+export function clearSequence() {
+  currentSequence = null;
+}
+
+// ── Dynamic 2FA Handling ──
+
+export async function handleCodeRotation(io) {
+  if (!globalGamePin) return;
+
+  io.emit("log", { type: "warn", msg: "[-] 2FA Code Rotated! Auto-cracking new code..." });
+
+  // Clear the outdated sequence
+  currentSequence = null;
+
+  const wasRunning = running === true;
+
+  if (wasRunning) {
+    running = "paused";
+    io.emit("state", getState());
+  }
+
+  // If swarm is not already running, start it
+  if (!swarmActive) {
+    await toggleSwarm(io);
+  }
+  // If swarm IS running, the existing swarm bots will receive TwoFactorReset
+  // from the Kahoot server and automatically re-guess their permutation.
+  // The swarm loop in toggleSwarm will pick up the result.
+}
+
+async function resumeDeployment(io) {
+  io.emit("log", { type: "info", msg: "[+] Resuming deployment with new code..." });
+  running = true;
+  io.emit("state", getState());
+
+  // Distribute code to all bots waiting at 2FA screen
+  for (let i = 0; i < totalCount; i++) {
+    const bot = bots[i];
+    if (bot && bot._waitingFor2FA) {
+      bot.answerTwoFactorAuth(currentSequence).catch(() => { });
+    }
+  }
+
+  // Spawn any unspawned placeholder bots
+  for (let i = 0; i < totalCount; i++) {
+    if (!running || running === "paused") break;
+    if (bots[i] && bots[i]._isPlaceholder) {
+      spawnBot(i);
+      await delay(globalJoinDelay);
+    }
+  }
+
+  if (running === true) {
+    io.emit("log", { type: "info", msg: "[+] All spawn commands sent (resumed)." });
+  }
+}
+
 export function forceSetSequence(seq, io) {
   if (!running) return;
   currentSequence = seq;
-  io.emit("log", { type: "success", msg: `[+] 2FA code set: [${seq}] — Distributing to waiting bots...` });
+  io.emit("log", { type: "success", msg: `[+] 2FA code set: [${seq}]` });
 
-  // Distribute to all bots waiting for 2FA
   let pushed = 0;
   for (let i = 0; i < bots.length; i++) {
     const bot = bots[i];
     if (bot && bot._waitingFor2FA) {
-      // Stagger the answers to avoid rate limiting
-      const staggerDelay = pushed * 200;
+      const d = pushed * 200;
       setTimeout(() => {
         if (running && bot._waitingFor2FA) {
           bot.answerTwoFactorAuth(seq).catch(() => { });
         }
-      }, staggerDelay);
+      }, d);
       pushed++;
     }
   }
   io.emit("log", { type: "info", msg: `[i] Sending 2FA to ${pushed} waiting bots...` });
+}
+
+/**
+ * Deploy additional bots to an already-running session.
+ */
+export async function addMoreBots(config, io) {
+  if (!running || !globalGamePin) {
+    io.emit("log", { type: "error", msg: "Deploy bots first before adding more." });
+    return;
+  }
+
+  const { botCount, botPrefix, nameMode } = config;
+  const addCount = Math.max(botCount || 0, 1);
+  const oldTotal = totalCount;
+  totalCount += addCount;
+  _io = io;
+
+  io.emit("log", { type: "info", msg: `[i] Adding ${addCount} more bots...` });
+
+  // Generate names for the new bots
+  for (let i = oldTotal; i < totalCount; i++) {
+    if (nameMode === "random") {
+      resolvedNames.push(generateRandomName());
+    } else {
+      resolvedNames.push(`${botPrefix || "Bot"}_${i + 1}`);
+    }
+    bots.push({
+      _botName: resolvedNames[i],
+      _status: "waiting",
+      _waitingFor2FA: false,
+      _isPlaceholder: true,
+      leave: () => { }
+    });
+  }
+
+  // Spawn them
+  for (let i = oldTotal; i < totalCount; i++) {
+    if (!running || running === "paused") break;
+    spawnBot(i);
+    await delay(globalJoinDelay);
+  }
+
+  io.emit("log", { type: "info", msg: `[+] ${addCount} additional bots deployed.` });
+  io.emit("stats", { joined: joinedCount, failed: failedCount, total: totalCount });
 }
 
 export async function startBots(config, io) {
@@ -133,39 +297,17 @@ export async function startBots(config, io) {
 
   running = true;
   bots = [];
-  currentSequence = null;
   globalGamePin = gamePin;
   globalJoinDelay = Math.max(joinDelay || 200, 150);
   joinedCount = 0;
   failedCount = 0;
   totalCount = botCount;
-  swarmActive = false;
   _io = io;
   _answerMode = answerMode;
 
   io.emit("state", getState());
 
-  // ── Step 1: Probe for 2FA ──
-  let has2FA = false;
-  try {
-    const probeResult = await probe2FA(gamePin, io);
-    has2FA = probeResult.twoFactorAuth;
-    if (has2FA) {
-      io.emit("log", { type: "info", msg: "[i] 2FA detected. Use the shape buttons or Swarm to crack it." });
-    }
-  } catch (err) {
-    io.emit("log", { type: "error", msg: `[-] 2FA probe failed: ${err.message || err}` });
-    if (!running) return;
-    io.emit("log", { type: "warn", msg: "Continuing without 2FA check..." });
-  }
-
-  if (!running) return;
-
-  // Wait for probe to fully disconnect before spawning bots
-  await delay(1500);
-  if (!running) return;
-
-  // ── Resolve names ──
+  // Resolve names
   resolvedNames = [];
   for (let i = 0; i < botCount; i++) {
     if (nameMode === "random") {
@@ -188,15 +330,20 @@ export async function startBots(config, io) {
 
   io.emit("log", { type: "info", msg: `[i] Spawning ${botCount} bots with ${globalJoinDelay}ms delay...` });
 
-  // ── Spawn loop ──
+  // Spawn loop
   for (let i = 0; i < botCount; i++) {
     if (!running) break;
+    if (running === "paused") {
+      io.emit("log", { type: "warn", msg: "[!] Deployment paused (2FA reset)..." });
+      return;
+    }
     spawnBot(i);
-    // Strictly wait between each bot spawn
     await delay(globalJoinDelay);
   }
 
-  io.emit("log", { type: "info", msg: `[+] All ${botCount} spawn commands sent.` });
+  if (running === true) {
+    io.emit("log", { type: "info", msg: `[+] All ${botCount} spawn commands sent.` });
+  }
 }
 
 // ── Internal ──
@@ -206,7 +353,7 @@ function spawnBot(i, retries = 0) {
   const io = _io;
   const answerMode = _answerMode;
 
-  // Clean up old instance if it exists and is a real bot
+  // Clean up old instance
   if (bots[i] && !bots[i]._isPlaceholder) {
     try { bots[i].leave(); } catch { }
   }
@@ -217,21 +364,18 @@ function spawnBot(i, retries = 0) {
   bot._status = "joining";
   bot._waitingFor2FA = false;
   bot._isPlaceholder = false;
-  bot._joined = false;  // Track if this bot ever successfully got ingame
+  bot._joined = false;
   bots[i] = bot;
 
   io.emit("botUpdate", { index: i, name: bot._botName, status: "joining" });
 
-  // ── 10s watchdog — if bot hasn't joined in 10s, retry ──
+  // 10s watchdog
   const joinWatchdog = setTimeout(() => {
     if (bot._status === "joining" && running) {
       try { bot.leave(); } catch { }
-      if (retries < 10) {
+      if (retries < 3) {
         setBotStatus(i, "retry", io);
-        // Wait before retry to avoid hammering
-        setTimeout(() => {
-          if (running) spawnBot(i, retries + 1);
-        }, globalJoinDelay);
+        setTimeout(() => { if (running) spawnBot(i, retries + 1); }, globalJoinDelay);
       } else {
         setBotStatus(i, "error", io);
         failedCount++;
@@ -240,15 +384,12 @@ function spawnBot(i, retries = 0) {
     }
   }, 10000);
 
-  // ── Join ──
-  bot.join(globalGamePin, bot._botName).catch((err) => {
+  bot.join(globalGamePin, bot._botName).catch(() => {
     clearTimeout(joinWatchdog);
     if (bot._status !== "ingame" && running) {
-      if (retries < 10) {
+      if (retries < 3) {
         setBotStatus(i, "retry", io);
-        setTimeout(() => {
-          if (running) spawnBot(i, retries + 1);
-        }, globalJoinDelay);
+        setTimeout(() => { if (running) spawnBot(i, retries + 1); }, globalJoinDelay);
       } else {
         setBotStatus(i, "error", io);
         failedCount++;
@@ -257,7 +398,6 @@ function spawnBot(i, retries = 0) {
     }
   });
 
-  // ── Joined event ──
   bot.on("Joined", (settings) => {
     clearTimeout(joinWatchdog);
     if (!running) return;
@@ -268,14 +408,9 @@ function spawnBot(i, retries = 0) {
       io.emit("botUpdate", { index: i, name: bot._botName, status: "2fa" });
 
       if (currentSequence) {
-        // We already have the code — answer immediately
-        // (the library has its own 250ms built-in cooldown)
         bot.answerTwoFactorAuth(currentSequence).catch(() => { });
       }
-      // If no currentSequence yet, bot waits. forceSetSequence() will
-      // distribute the code to all waiting bots when it arrives.
     } else {
-      // No 2FA — bot is in game!
       bot._status = "ingame";
       bot._joined = true;
       joinedCount++;
@@ -284,7 +419,6 @@ function spawnBot(i, retries = 0) {
     }
   });
 
-  // ── 2FA correct ──
   bot.on("TwoFactorCorrect", () => {
     if (!running) return;
     bot._waitingFor2FA = false;
@@ -295,24 +429,24 @@ function spawnBot(i, retries = 0) {
     io.emit("stats", { joined: joinedCount, failed: failedCount, total: totalCount });
   });
 
-  // ── 2FA reset (code changed) ──
   bot.on("TwoFactorReset", () => {
     if (!running) return;
-    // If we have a currentSequence, try it again — it might still be correct
-    // (TwoFactorReset fires as part of the normal flow too)
+
+    if (!bot._waitingFor2FA && bot._status !== "ingame") {
+      bot._waitingFor2FA = true;
+      bot._status = "2fa";
+      io.emit("botUpdate", { index: i, name: bot._botName, status: "2fa" });
+    }
+
     if (currentSequence && bot._waitingFor2FA) {
       bot.answerTwoFactorAuth(currentSequence).catch(() => { });
     }
   });
 
-  // ── 2FA wrong ──
   bot.on("TwoFactorWrong", () => {
-    if (!running) return;
-    // Wrong code — the user/swarm needs to find the right one
-    // Don't retry, just wait
+    // Wait for correct code
   });
 
-  // ── Question answering ──
   bot.on("QuestionStart", (question) => {
     if (!running) return;
     let answerIndex;
@@ -321,18 +455,15 @@ function spawnBot(i, retries = 0) {
     } else {
       answerIndex = Math.floor(Math.random() * (question.answerCount || 4));
     }
-    // Random human-like delay before answering
     setTimeout(() => {
       if (running) bot.answer(answerIndex);
     }, 500 + Math.random() * 2000);
   });
 
-  // ── Disconnect ──
   bot.on("Disconnect", (reason) => {
     clearTimeout(joinWatchdog);
     if (!running) return;
 
-    // Only decrement joinedCount if this bot was actually ingame
     if (bot._joined) {
       joinedCount = Math.max(0, joinedCount - 1);
       bot._joined = false;
@@ -341,12 +472,11 @@ function spawnBot(i, retries = 0) {
 
     bot._waitingFor2FA = false;
 
-    // Retry if under the limit
-    if (retries < 10) {
+    if (retries < 3) {
       setBotStatus(i, "retry", io);
       setTimeout(() => {
         if (running) spawnBot(i, retries + 1);
-      }, globalJoinDelay * 2); // Double delay on disconnect retry
+      }, globalJoinDelay * 2);
     } else {
       setBotStatus(i, "error", io);
       failedCount++;

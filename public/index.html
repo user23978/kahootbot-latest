@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Kahoot Bot — Control Panel</title>
+  <title>Kahoot Bot - WebUI</title>
   <meta name="description" content="Kahoot Bot Control Panel with automated 2FA bypass">
   <link rel="stylesheet" href="/style.css">
   <script src="/socket.io/socket.io.js"></script>
@@ -16,103 +16,99 @@
     <!-- ═══ Header ═══ -->
     <header class="header">
       <div class="header-left">
-        <span class="logo-icon">[ ]</span>
+        <span class="logo-icon">{/}</span>
         <span class="logo">KAHOOT BOT</span>
-        <span class="version">v3.0 — by Leo</span>
+        <span class="version">v3.2 — by Leo</span>
       </div>
       <div class="header-stats">
         <div class="stat">
-          <span class="stat-dot green"></span>
           <span class="stat-value" id="stat-joined">0</span>
-          <span>Im Spiel</span>
+          <span>Joined</span>
         </div>
         <div class="stat">
-          <span class="stat-dot red"></span>
           <span class="stat-value" id="stat-failed">0</span>
-          <span>Fehler</span>
+          <span>Failed</span>
         </div>
         <div class="stat">
-          <span class="stat-dot yellow"></span>
           <span class="stat-value" id="stat-total">0</span>
-          <span>Gesamt</span>
+          <span>Total</span>
         </div>
       </div>
     </header>
 
     <!-- ═══ Sidebar ═══ -->
     <aside class="sidebar">
-      <!-- Config Card -->
-      <div class="card">
-        <div class="card-title">Konfiguration</div>
+      <!-- Step 1: Connect -->
+      <div class="card" id="cardStep1">
+        <div class="card-title">1. Connect & Probe</div>
         <div class="field">
           <label for="gamePin">Game PIN</label>
-          <input type="text" id="gamePin" placeholder="z.B. 1568989" maxlength="8" autocomplete="off">
+          <input type="text" id="gamePin" placeholder="e.g. 1568989" maxlength="8" autocomplete="off">
         </div>
-        <div class="field">
-          <label for="botCount">Anzahl Bots</label>
-          <input type="number" id="botCount" value="100" min="1" max="500">
-        </div>
-        <div class="field">
-          <label for="botPrefix">Bot Prefix</label>
-          <input type="text" id="botPrefix" value="Bot" placeholder="z.B. Bot">
-        </div>
-        <div class="field">
-          <label for="nameMode">Namen Modus</label>
-          <select id="nameMode">
-            <option value="prefix">Prefix (Bot_1, Bot_2...)</option>
-            <option value="random" selected>Zufällige Namen</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="joinDelay">Join Delay (ms)</label>
-          <input type="number" id="joinDelay" value="200" min="50" max="10000">
-        </div>
-        <div class="field">
-          <label for="answerMode">Antwort Modus</label>
-          <select id="answerMode">
-            <option value="random" selected>Random</option>
-            <option value="correct">Korrekt (wenn möglich)</option>
-          </select>
-        </div>
+        <button class="btn btn-start" id="btnConnect" onclick="handleConnect()" style="width: 100%; margin-top: 10px;">
+          Connect
+        </button>
+        <button class="btn btn-stop" id="btnDisconnect" onclick="handleDisconnectAll()"
+          style="width: 100%; margin-top: 6px; display: none;">
+          Disconnect
+        </button>
       </div>
 
-      <!-- 2FA Status Card -->
-      <div class="card tfa-card">
-        <div class="card-title">2FA Bypass Status</div>
+      <!-- Step 2: 2FA Swarm -->
+      <div class="card tfa-card" id="cardStep2" style="opacity: 0.5; pointer-events: none;">
+        <div class="card-title">2. Resolve 2FA</div>
         <div class="tfa-status idle" id="tfaStatus">
-          <span>⏸ Warte auf Start...</span>
+          <span>⏸ Waiting for Scout...</span>
         </div>
         <div class="tfa-progress" id="tfaProgressContainer" style="display:none;">
           <div class="tfa-progress-bar" id="tfaProgressBar" style="width:0%"></div>
         </div>
-        <div class="field" style="margin-top: 15px;">
-          <label style="font-size: 11px; opacity: 0.7; text-align: center;">Manuelle 2FA Eingabe</label>
-          <div class="k-shape-container">
-            <button class="k-shape k-red" onclick="addManualShape(0)">▲</button>
-            <button class="k-shape k-blue" onclick="addManualShape(1)">◆</button>
-            <button class="k-shape k-yellow" onclick="addManualShape(2)">●</button>
-            <button class="k-shape k-green" onclick="addManualShape(3)">■</button>
-          </div>
-          <div class="k-preview" id="manual2faPreview">
-            <span style="color:var(--text-muted);font-size:12px;">Keine Eingabe</span>
-          </div>
-          <div style="display: flex; gap: 8px; margin-top: 8px;">
-            <button class="btn btn-recrack" onclick="clearManual2FA()" style="flex: 1; background: transparent;">Löschen</button>
-            <button class="btn btn-recrack" onclick="sendManual2FA()" style="flex: 2; background: var(--text-primary); color: var(--bg-primary);">Senden</button>
-          </div>
-        </div>
+        <button class="btn btn-recrack" id="btnSwarm" onclick="handleSwarmToggle()"
+          style="width: 100%; margin-top: 10px;" disabled>
+          Start Bypass
+        </button>
       </div>
 
-      <!-- Action Buttons -->
-      <div class="btn-group">
-        <button class="btn btn-start" id="btnStart" onclick="handleStart()">
-          ▶ Start
+      <!-- Step 3: Deploy -->
+      <div class="card" id="cardStep3" style="opacity: 0.5; pointer-events: none;">
+        <div class="card-title">3. Deploy Bots</div>
+        <div class="field">
+          <label for="botCount">Bot Count</label>
+          <input type="number" id="botCount" value="50" min="1" max="500">
+        </div>
+        <div class="field">
+          <label for="botPrefix">Bot Prefix</label>
+          <input type="text" id="botPrefix" value="Bot" placeholder="e.g. Bot">
+        </div>
+        <div class="field">
+          <label for="nameMode">Name Style</label>
+          <select id="nameMode">
+            <option value="prefix">Prefix (Bot_1, Bot_2...)</option>
+            <option value="random" selected>Random Names</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="joinDelay">Join Delay (ms)</label>
+          <input type="number" id="joinDelay" value="2000" min="50" max="10000">
+        </div>
+        <div class="field">
+          <label for="answerMode">Answer Mode (Beta)</label>
+          <select id="answerMode">
+            <option value="random" selected>Random</option>
+            <option value="correct">Correct (if possible)</option>
+          </select>
+        </div>
+        <button class="btn btn-start" id="btnDeploy" onclick="handleDeploy()" style="width: 100%; margin-top: 10px;"
+          disabled>
+          Send Bots
         </button>
-        <button class="btn btn-recrack" id="btnRecrack" onclick="handleRecrack()" disabled>
-          🐝 Swarm
+        <button class="btn btn-start" id="btnAddMore" onclick="handleAddMore()"
+          style="width: 100%; margin-top: 6px; display: none; background: #7c3aed; border-color: #6d28d9;">
+          Send again
         </button>
-        <button class="btn btn-stop" id="btnStop" onclick="handleStop()" disabled>
-          ⏹ Stop
+        <button class="btn btn-stop" id="btnStop" onclick="handleStop()" disabled
+          style="width: 100%; margin-top: 6px; background: #e21b3c; border-color: #c61734; color: white;">
+          Remove Bots
         </button>
       </div>
     </aside>
@@ -127,7 +123,7 @@
         <div class="bot-grid" id="botGrid">
           <div class="empty-state" id="emptyState">
             <div class="empty-state-icon">[-]</div>
-            <div class="empty-state-text">Keine Bots aktiv</div>
+            <div class="empty-state-text">No bots active</div>
           </div>
         </div>
       </div>
@@ -136,7 +132,7 @@
       <div class="log-panel">
         <div class="log-header">
           <span class="log-title">Log</span>
-          <button class="log-clear" onclick="clearLog()">Löschen</button>
+          <button class="log-clear" onclick="clearLog()">Clear</button>
         </div>
         <div class="log-entries" id="logEntries">
         </div>
@@ -154,9 +150,17 @@
     const $nameMode = document.getElementById('nameMode');
     const $delay = document.getElementById('joinDelay');
     const $answer = document.getElementById('answerMode');
-    const $btnStart = document.getElementById('btnStart');
-    const $btnRecrack = document.getElementById('btnRecrack');
+
+    const $btnConnect = document.getElementById('btnConnect');
+    const $btnDisconnect = document.getElementById('btnDisconnect');
+    const $btnSwarm = document.getElementById('btnSwarm');
+    const $btnDeploy = document.getElementById('btnDeploy');
+    const $btnAddMore = document.getElementById('btnAddMore');
     const $btnStop = document.getElementById('btnStop');
+
+    const $cardStep2 = document.getElementById('cardStep2');
+    const $cardStep3 = document.getElementById('cardStep3');
+
     const $botGrid = document.getElementById('botGrid');
     const $emptyState = document.getElementById('emptyState');
     const $logEntries = document.getElementById('logEntries');
@@ -167,104 +171,125 @@
 
     // ── State ──
     let isRunning = false;
+    let has2FA = false;
+    let isSwarmActive = false;
+    let scoutConnected = false;
 
     // ── Actions ──
-    function handleStart() {
-      const pin = $pin.value.trim();
-      if (!/^\d{6,8}$/.test(pin)) {
-        addLog('error', 'Ungültiger PIN! Muss 6-8 Ziffern sein.');
-        $pin.focus();
+    function handleConnect() {
+      const config = {
+        gamePin: $pin.value.trim()
+      };
+
+      if (!config.gamePin) {
+        alert('Please enter a Game PIN!');
         return;
       }
 
+      $btnConnect.disabled = true;
+      $btnDisconnect.style.display = 'block';
+      scoutConnected = true;
+
+      // Clear old bot cells except keep grid clean
+      const emptyEl = document.getElementById('emptyState');
+      if (emptyEl) emptyEl.remove();
+
+      // Reset 2FA
+      setTfaStatus('idle', '⏸ Checking...');
+      $cardStep2.style.opacity = '1';
+      $cardStep2.style.pointerEvents = 'auto';
+
+      socket.emit('connectScout', config);
+      addLog('info', `Connecting Scout to PIN ${config.gamePin}...`);
+    }
+
+    function handleDisconnectAll() {
+      socket.emit('disconnectAll');
+      resetUI();
+      addLog('warn', 'Disconnect all signal sent...');
+    }
+
+    function handleDeploy() {
       const config = {
-        gamePin: pin,
-        botCount: parseInt($count.value) || 100,
+        gamePin: $pin.value.trim(),
+        botCount: parseInt($count.value) || 50,
         botPrefix: $prefix.value.trim() || 'Bot',
-        botNames: $nameMode.value === 'random' ? [] : [],
-        joinDelay: parseInt($delay.value) || 200,
+        joinDelay: parseInt($delay.value) || 2000,
         answerMode: $answer.value,
         nameMode: $nameMode.value
       };
 
-      // Generate random names server-side if needed
-      if ($nameMode.value === 'random') {
-        config.botNames = []; // empty = server generates random
+      if (!config.gamePin) {
+        alert('Please enter a Game PIN!');
+        return;
       }
 
       isRunning = true;
-      $btnStart.disabled = true;
+      $btnDeploy.disabled = true;
       $btnStop.disabled = false;
-      $btnRecrack.disabled = false;
-      $botGrid.innerHTML = '';
-      $emptyState && $emptyState.remove();
+      $btnAddMore.style.display = 'block';
 
-      // Reset stats
       document.getElementById('stat-joined').textContent = '0';
       document.getElementById('stat-failed').textContent = '0';
       document.getElementById('stat-total').textContent = config.botCount;
 
-      // Reset 2FA
-      setTfaStatus('idle', '⏸ Wird geprüft...');
-
       socket.emit('start', config);
-      addLog('info', `Starte ${config.botCount} Bots für PIN ${config.gamePin}...`);
+      addLog('info', `Deploying ${config.botCount} bots to PIN ${config.gamePin}...`);
+    }
+
+    function handleAddMore() {
+      const config = {
+        botCount: parseInt($count.value) || 10,
+        botPrefix: $prefix.value.trim() || 'Bot',
+        nameMode: $nameMode.value
+      };
+      socket.emit('addMoreBots', config);
+      addLog('info', `Adding ${config.botCount} more bots...`);
     }
 
     function handleStop() {
       socket.emit('stop');
       isRunning = false;
-      $btnStart.disabled = false;
+      $btnConnect.disabled = false;
+      $btnDeploy.disabled = false;
       $btnStop.disabled = true;
-      $btnRecrack.disabled = true;
-      addLog('warn', 'Stop-Signal gesendet...');
+      $btnAddMore.style.display = 'none';
+      addLog('warn', 'Stop signal sent...');
     }
 
-    function handleRecrack() {
-      if (isRunning) {
-        socket.emit('toggleSwarm');
-      }
+    function handleSwarmToggle() {
+      socket.emit('toggleSwarm');
     }
 
-    let manualSequence = [];
+    function resetUI() {
+      isRunning = false;
+      has2FA = false;
+      isSwarmActive = false;
+      scoutConnected = false;
 
-    function addManualShape(shapeId) {
-      if(manualSequence.length < 4) {
-        manualSequence.push(shapeId);
-        updateManualPreview();
-      }
-    }
+      $btnConnect.disabled = false;
+      $btnDisconnect.style.display = 'none';
+      $btnDeploy.disabled = true;
+      $btnStop.disabled = true;
+      $btnAddMore.style.display = 'none';
+      $btnSwarm.disabled = true;
 
-    function clearManual2FA() {
-      manualSequence = [];
-      updateManualPreview();
-    }
+      $cardStep2.style.opacity = '0.5';
+      $cardStep2.style.pointerEvents = 'none';
+      $cardStep3.style.opacity = '0.5';
+      $cardStep3.style.pointerEvents = 'none';
 
-    function updateManualPreview() {
-      const colors = ['#e21b3c', '#1368ce', '#d89e00', '#26890c'];
-      const preview = document.getElementById('manual2faPreview');
-      preview.innerHTML = '';
-      if(manualSequence.length === 0) {
-        preview.innerHTML = '<span style="color:var(--text-muted);font-size:12px;">Keine Eingabe</span>';
-      } else {
-        manualSequence.forEach(s => {
-          const dot = document.createElement('div');
-          dot.className = 'k-preview-dot';
-          dot.style.background = colors[s];
-          preview.appendChild(dot);
-        });
-      }
-    }
+      setTfaStatus('idle', '⏸ Waiting for Scout...');
+      $tfaProgressContainer.style.display = 'none';
+      $tfaProgressBar.style.width = '0%';
 
-    function sendManual2FA() {
-      if (!isRunning) return;
-      if(manualSequence.length === 4) {
-        socket.emit('manual2FA', manualSequence);
-        addLog('info', `Manuelle 2FA gesendet: [${manualSequence}]`);
-        clearManual2FA();
-      } else {
-        addLog('error', 'Ungültig: Bitte genau 4 Symbole wählen!');
-      }
+      // Clear bot grid
+      $botGrid.innerHTML = '<div class="empty-state" id="emptyState"><div class="empty-state-icon">[-]</div><div class="empty-state-text">No bots active</div></div>';
+      $gridTitle.textContent = 'Bots';
+
+      document.getElementById('stat-joined').textContent = '0';
+      document.getElementById('stat-failed').textContent = '0';
+      document.getElementById('stat-total').textContent = '0';
     }
 
     // ── Socket Events ──
@@ -280,43 +305,82 @@
     });
 
     socket.on('botUpdate', (data) => {
+      if (data.status === 'remove') {
+        // Remove the bot cell from the grid
+        const cell = document.getElementById(`bot-${data.index}`);
+        if (cell) cell.remove();
+        updateGridTitle();
+        return;
+      }
       updateBotCell(data.index, data.name, data.status);
     });
 
     socket.on('tfaStatus', (data) => {
       switch (data.phase) {
+        case 'idle':
+          setTfaStatus('idle', '⏸ Waiting for Scout...');
+          $btnSwarm.disabled = true;
+          $btnSwarm.textContent = '🐝 Start Swarm';
+          isSwarmActive = false;
+          break;
         case 'probing':
-          setTfaStatus('probing', '🔍 Prüfe auf 2FA...');
+          setTfaStatus('probing', '[i] Checking for 2FA...');
+          break;
+        case 'reconnecting':
+          setTfaStatus('idle', '[i] Scout Reconnecting...');
           break;
         case 'probed':
           if (data.has2FA) {
-            setTfaStatus('cracking', '🔐 2FA erkannt!');
+            has2FA = true;
+            setTfaStatus('cracking', '[!] 2FA detected — ready to crack');
+            $btnSwarm.disabled = false;
+            $btnSwarm.textContent = 'Start Bypass';
           } else {
-            setTfaStatus('idle', '✅ Kein 2FA');
+            setTfaStatus('idle', '[+] No 2FA');
+            $cardStep3.style.opacity = '1';
+            $cardStep3.style.pointerEvents = 'auto';
+            $btnDeploy.disabled = false;
           }
           break;
         case 'cracking':
-          setTfaStatus('cracking', `⚡ Cracking... (${data.progress || 0}/24 Bots)`);
+          isSwarmActive = true;
+          setTfaStatus('cracking', `[i] Cracking... (${data.progress || 0}/24 Bots)`);
           $tfaProgressContainer.style.display = 'block';
           $tfaProgressBar.style.width = `${((data.progress || 0) / 24) * 100}%`;
+          $tfaProgressBar.style.backgroundColor = '';
+          $btnSwarm.disabled = false;
+          $btnSwarm.textContent = 'Stop Bypass';
           break;
         case 'cracked':
-          setTfaStatus('cracked', `✅ Geknackt: `);
+          isSwarmActive = false;
+          setTfaStatus('cracked', `[+] Cracked: `);
           $tfaStatus.innerHTML += `<span class="tfa-sequence">[${data.sequence}]</span>`;
-          $tfaProgressContainer.style.display = 'none';
+          $tfaProgressBar.style.width = '100%';
+          $tfaProgressBar.style.backgroundColor = '#10b981';
+          $cardStep3.style.opacity = '1';
+          $cardStep3.style.pointerEvents = 'auto';
+          $btnDeploy.disabled = false;
+          $btnSwarm.disabled = false;
+          $btnSwarm.textContent = 'Re-Crack';
           break;
         case 'error':
-          setTfaStatus('error', '❌ 2FA Fehler');
+          isSwarmActive = false;
+          setTfaStatus('error', '[!] 2FA Error');
           $tfaProgressContainer.style.display = 'none';
+          $btnSwarm.disabled = false;
+          $btnSwarm.textContent = 'Start Bypass';
           break;
       }
     });
 
     socket.on('state', (data) => {
       isRunning = data.running;
-      $btnStart.disabled = data.running;
-      $btnStop.disabled = !data.running;
-      $btnRecrack.disabled = !data.running;
+      if (isRunning) {
+        $btnConnect.disabled = true;
+        $btnDeploy.disabled = true;
+        $btnStop.disabled = false;
+        $btnAddMore.style.display = 'block';
+      }
     });
 
     // ── UI Helpers ──
@@ -331,6 +395,10 @@
     function updateBotCell(index, name, status) {
       let cell = document.getElementById(`bot-${index}`);
       if (!cell) {
+        // Remove empty state if present
+        const emptyEl = document.getElementById('emptyState');
+        if (emptyEl) emptyEl.remove();
+
         cell = document.createElement('div');
         cell.id = `bot-${index}`;
         cell.className = 'bot-cell';
@@ -350,11 +418,16 @@
 
       cell.className = `bot-cell ${status.replace('2fa_failed', 'two_fa_failed')}`;
       cell.innerHTML = `
-      <span class="bot-name" title="${name}">${name}</span>
-      <span class="bot-badge">${statusLabels[status] || status}</span>
-    `;
+        <span class="bot-name" title="${name}">${name}</span>
+        <span class="bot-badge">${statusLabels[status] || status}</span>
+      `;
 
-      $gridTitle.textContent = `Bots (${$botGrid.children.length})`;
+      updateGridTitle();
+    }
+
+    function updateGridTitle() {
+      const count = $botGrid.querySelectorAll('.bot-cell').length;
+      $gridTitle.textContent = count > 0 ? `Bots (${count})` : 'Bots';
     }
 
     function addLog(type, msg) {
@@ -387,7 +460,7 @@
 
     // ── Keyboard shortcut ──
     $pin.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !isRunning) handleStart();
+      if (e.key === 'Enter' && !$btnConnect.disabled) handleConnect();
     });
   </script>
 

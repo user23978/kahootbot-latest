@@ -1,4 +1,5 @@
 import Kahoot from "kahoot.js-latest";
+import { handleCodeRotation } from "./botManager.js";
 
 const ALL_PERMS = [
   [0, 1, 2, 3], [0, 1, 3, 2], [0, 2, 1, 3], [0, 2, 3, 1], [0, 3, 1, 2], [0, 3, 2, 1],
@@ -9,149 +10,249 @@ const ALL_PERMS = [
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-/**
- * Probes a game to check if 2FA is enabled using a single throwaway bot.
- */
+// ── Scout state ──
+let scout = null;
+let scoutReconnectTimer = null;
+let currentScoutPin = null;
+let _scoutIo = null;
+let scoutKilled = false; // Flag to prevent reconnect after intentional kill
+
+// ── Crack cooldown: prevents scout from re-triggering swarm right after a crack ──
+let lastCrackTime = 0;
+
+export function killScout() {
+  scoutKilled = true;
+  clearTimeout(scoutReconnectTimer);
+  scoutReconnectTimer = null;
+  if (scout) {
+    try { scout.leave(); } catch {}
+    scout = null;
+  }
+  currentScoutPin = null;
+}
+
+// ── Swarm state ──
+let swarmResolve = null;
+let swarmBots = [];
+let swarmDone = false;
+
+export function abortSwarm() {
+  swarmDone = true;
+  cleanupSwarm();
+  if (swarmResolve) {
+    const r = swarmResolve;
+    swarmResolve = null;
+    r(null);
+  }
+}
+
+// ── Scout ──
+
 export async function probe2FA(gamePin, io) {
-  io.emit("log", { type: "info", msg: `[i] Prüfe Spiel ${gamePin} auf 2FA...` });
+  currentScoutPin = gamePin;
+  _scoutIo = io;
+  scoutKilled = false;
+  io.emit("log", { type: "info", msg: `[i] Scout connecting to room ${gamePin}...` });
   io.emit("tfaStatus", { phase: "probing" });
 
-  const scout = new Kahoot();
+  killScout();
+  scoutKilled = false; // Reset after kill so reconnect can work
+  currentScoutPin = gamePin; // Restore after kill cleared it
+
+  scout = new Kahoot();
   scout.loggingMode = false;
+  let has2FA = false;
+  let resolved = false;
 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      try { scout.leave(); } catch { }
-      io.emit("log", { type: "error", msg: "[-] Probe timed out after 15s" });
-      io.emit("tfaStatus", { phase: "error" });
-      reject(new Error("Probe timed out"));
-    }, 15000);
+      if (!resolved) {
+        resolved = true;
+        killScout();
+        io.emit("tfaStatus", { phase: "error" });
+        reject(new Error("Scout timeout"));
+      }
+    }, 10000);
 
-    scout.join(gamePin, `Scout_${Math.floor(Math.random() * 90000) + 10000}`)
-      .catch((err) => {
+    const botName = `Scout_${Math.floor(Math.random() * 9000) + 1000}`;
+    io.emit("botUpdate", { index: "scout", name: botName, status: "joining" });
+
+    scout.join(gamePin, botName).catch((err) => {
+      if (!resolved) {
+        resolved = true;
         clearTimeout(timeout);
+        killScout();
+        io.emit("log", { type: "error", msg: `[-] Scout failed: ${err.message}` });
+        io.emit("tfaStatus", { phase: "error" });
+        io.emit("botUpdate", { index: "scout", name: botName, status: "error" });
         reject(err);
-      });
+      }
+    });
 
     scout.on("Joined", (settings) => {
+      if (resolved) return;
+      resolved = true;
       clearTimeout(timeout);
-      const has2FA = !!settings.twoFactorAuth;
-      try { scout.leave(); } catch { }
+      has2FA = settings.twoFactorAuth;
+      io.emit("botUpdate", { index: "scout", name: botName, status: "ingame" });
 
       if (has2FA) {
-        io.emit("log", { type: "warn", msg: "[!] 2FA ist aktiviert!" });
+        io.emit("log", { type: "warn", msg: "[!] 2FA detected! Scout monitoring." });
+        io.emit("tfaStatus", { phase: "probed", has2FA: true });
+        resolve({ twoFactorAuth: true });
       } else {
-        io.emit("log", { type: "success", msg: "[+] Kein 2FA. Bots können direkt joinen." });
+        io.emit("log", { type: "success", msg: "[+] No 2FA detected. Scout monitoring." });
+        io.emit("tfaStatus", { phase: "probed", has2FA: false });
+        resolve({ twoFactorAuth: false });
       }
-      io.emit("tfaStatus", { phase: "probed", has2FA });
-      resolve({ twoFactorAuth: has2FA });
     });
+
+    scout.on("TwoFactorReset", () => {
+      // ── COOLDOWN: If we JUST cracked within the last 5s, ignore this reset ──
+      // Kahoot fires TwoFactorCorrect and TwoFactorReset at the same time
+      // (end of the 10s cycle). Without this guard, the scout would clear
+      // the freshly-cracked code and start a brand new swarm unnecessarily.
+      if (Date.now() - lastCrackTime < 5000) {
+        io.emit("log", { type: "info", msg: "[i] Scout: ignoring reset (just cracked)." });
+        return;
+      }
+
+      if (!has2FA) {
+        has2FA = true;
+        io.emit("log", { type: "warn", msg: "[!] 2FA suddenly activated!" });
+        io.emit("tfaStatus", { phase: "probed", has2FA: true });
+      } else {
+        io.emit("log", { type: "warn", msg: "[!] Scout: 2FA Code Rotation!" });
+      }
+      handleCodeRotation(io);
+    });
+
+    const reconnect = (reason) => {
+      if (scoutKilled) return; // Don't reconnect if we intentionally killed
+      io.emit("log", { type: "warn", msg: `[!] Scout disconnected (${reason || "unknown"}). Reconnecting in 3s...` });
+      io.emit("tfaStatus", { phase: "reconnecting" });
+      io.emit("botUpdate", { index: "scout", name: botName, status: "retry" });
+      scout = null;
+      clearTimeout(scoutReconnectTimer);
+      scoutReconnectTimer = setTimeout(() => {
+        if (!scoutKilled && currentScoutPin) {
+          probe2FA(currentScoutPin, _scoutIo || io).catch(() => { });
+        }
+      }, 3000);
+    };
+
+    scout.on("Disconnect", reconnect);
+    scout.on("Kicked", reconnect);
   });
 }
 
-/**
- * Launches a 24-bot swarm to brute-force the 2FA sequence.
- * Each bot tries exactly ONE permutation. On TwoFactorReset (code rotation),
- * the bot does NOT retry the same perm — the code has changed so the old
- * answer is guaranteed wrong. Instead we let the other swarm bots handle it.
- * 
- * Returns the correct sequence array, or null on timeout.
- */
+// ── Swarm ──
+
 export async function crack2FA(gamePin, io) {
-  io.emit("log", { type: "warn", msg: "[!] Starte 2FA Brute-Force Swarm (24 Bots)..." });
+  abortSwarm();
+
+  io.emit("log", { type: "warn", msg: "[!] Starting 2FA Swarm (24 bots)..." });
   io.emit("tfaStatus", { phase: "cracking", progress: 0, total: 24 });
 
-  const swarmBots = [];
-  let cracked = false;
-  let timedOut = false;
+  swarmBots = [];
+  swarmDone = false;
   let joinedSoFar = 0;
 
   return new Promise((resolve) => {
-    // Safety timeout — resolves null, NEVER rejects
+    swarmResolve = resolve;
+
     const timeout = setTimeout(() => {
-      if (cracked) return;
-      timedOut = true;
-      cleanupSwarm(swarmBots);
-      io.emit("log", { type: "error", msg: "[-] 2FA Swarm Timeout (60s). Kein Code gefunden." });
+      if (swarmDone) return;
+      swarmDone = true;
+      cleanupSwarm();
+      io.emit("log", { type: "error", msg: "[-] 2FA Swarm Timeout (60s)." });
       io.emit("tfaStatus", { phase: "error" });
+      swarmResolve = null;
       resolve(null);
     }, 60000);
 
-    // Spawn all 24 swarm bots with staggered delays
+    const onCracked = (perm) => {
+      if (swarmDone) return;
+      swarmDone = true;
+      clearTimeout(timeout);
+
+      // Set cooldown so scout doesn't immediately re-trigger on the simultaneous TwoFactorReset
+      lastCrackTime = Date.now();
+
+      io.emit("log", { type: "success", msg: `[+] 2FA CRACKED! Sequence: [${perm}]` });
+      io.emit("tfaStatus", { phase: "cracked", sequence: perm });
+
+      cleanupSwarm();
+      swarmResolve = null;
+      resolve(perm);
+    };
+
     (async () => {
       for (let i = 0; i < ALL_PERMS.length; i++) {
-        if (cracked || timedOut) break;
+        if (swarmDone) break;
 
         const perm = ALL_PERMS[i];
         const bot = new Kahoot();
         bot.loggingMode = false;
+        bot._swarmAborted = false;
         swarmBots.push(bot);
 
         const botName = `Crack_${Math.floor(Math.random() * 90000) + 10000}`;
-
-        // Attempt join — don't let errors crash the loop
-        bot.join(gamePin, botName).catch(() => { });
+        bot.join(gamePin, botName).then(() => {
+          if (bot._swarmAborted || swarmDone) {
+            try { bot.leave(); } catch {}
+            return;
+          }
+          // The Promise resolves when the bot is FULLY joined and accepted by the server.
+          // We wait a small delay to ensure the server is ready to process 2FA guesses.
+          setTimeout(() => {
+            if (bot._swarmAborted || swarmDone) return;
+            io.emit("log", { type: "info", msg: `[*] Bot ${i} is sending guess: [${perm}]` });
+            bot.answerTwoFactorAuth(perm).catch(() => {});
+          }, 300);
+        }).catch(() => {});
 
         bot.on("Joined", (settings) => {
+          if (bot._swarmAborted || swarmDone) return;
           joinedSoFar++;
           io.emit("tfaStatus", { phase: "cracking", progress: joinedSoFar, total: 24 });
-
-          if (settings.twoFactorAuth && !cracked && !timedOut) {
-            // Answer IMMEDIATELY — the library already has a built-in
-            // 250ms cooldown, no need for extra delay. Extra delay causes
-            // the code to rotate before our answer arrives.
-            bot.answerTwoFactorAuth(perm).catch(() => { });
-          }
         });
 
-        // On TwoFactorReset: code rotated, our perm is now wrong.
-        // Do NOT retry — let other swarm bots with different perms handle it.
-        // This prevents the infinite retry-same-wrong-answer loop.
-        bot.on("TwoFactorReset", () => {
-          // Intentionally empty — don't retry same perm
-        });
+        // We DO NOT guess on TwoFactorReset! If the code rotates, the scout
+        // will abort this swarm and spawn a fresh one.
+        bot.on("TwoFactorReset", () => {});
 
         bot.on("TwoFactorCorrect", () => {
-          if (cracked) return;
-          cracked = true;
-          clearTimeout(timeout);
-
-          io.emit("log", { type: "success", msg: `[+] 2FA GEKNACKT! Sequenz: [${perm}]` });
-          io.emit("tfaStatus", { phase: "cracked", sequence: perm });
-
-          // Clean up OTHER swarm bots, but not the winner
-          for (const b of swarmBots) {
-            if (b !== bot) {
-              try { b.leave(); } catch { }
-            }
-          }
-          
-          // DO NOT let the winner leave. It will stay in the game!
-          // This helps verify that the crack actually worked.
-          
-          resolve(perm);
+          onCracked(perm);
         });
 
-        bot.on("TwoFactorWrong", () => {
-          // Wrong answer — this perm doesn't match. Do nothing,
-          // the bot will get a TwoFactorReset and we intentionally
-          // don't retry.
-        });
+        bot.on("TwoFactorWrong", () => { });
 
-        // Stagger: 500ms between each swarm bot to avoid rate limiting
-        await delay(500);
+        await delay(200);
       }
     })().catch((err) => {
-      if (!cracked && !timedOut) {
-        io.emit("log", { type: "error", msg: `[-] Interner Swarm-Fehler: ${err.message}` });
+      if (!swarmDone) {
+        io.emit("log", { type: "error", msg: `[-] Swarm error: ${err.message}` });
+        swarmDone = true;
+        cleanupSwarm();
+        swarmResolve = null;
         resolve(null);
       }
     });
   });
 }
 
-function cleanupSwarm(bots) {
-  for (const bot of bots) {
-    try { bot.leave(); } catch { }
+function cleanupSwarm() {
+  const toClean = swarmBots;
+  swarmBots = [];
+  for (const bot of toClean) {
+    bot._swarmAborted = true;
+    try { bot.leave(); } catch {}
   }
+  // Force close any remaining sockets after 1s so the leave packet has time to send
+  setTimeout(() => {
+    for (const bot of toClean) {
+      try { if (bot.socket) bot.socket.close(); } catch {}
+    }
+  }, 1000);
 }

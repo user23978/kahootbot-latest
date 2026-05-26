@@ -9,7 +9,7 @@ let config = {
   botNames: [],
   botPrefix: "Bot",
   customNames: false,
-  joinDelay: 100,
+  joinDelay: 2000,
   answerMode: "random"
 };
 

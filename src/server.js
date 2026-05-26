@@ -3,7 +3,10 @@ import { createServer } from "http";
 import { Server } from "socket.io";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import { startBots, stopBots, getState, forceRecrack, forceSetSequence, toggleSwarm } from "./botManager.js";
+import {
+  startBots, stopBots, getState, forceRecrack, forceSetSequence,
+  toggleSwarm, clearSequence, setGlobalPin, disconnectAll, addMoreBots
+} from "./botManager.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -26,17 +29,32 @@ io.on("connection", (socket) => {
     startBots(config, io);
   });
 
+  socket.on("connectScout", (config) => {
+    clearSequence();
+    setGlobalPin(config.gamePin);
+    import("./twoFactorCracker.js").then(({ probe2FA }) => {
+      probe2FA(config.gamePin, io).catch(() => {});
+    });
+  });
+
   socket.on("stop", () => {
     stopBots(io);
   });
 
+  socket.on("disconnectAll", () => {
+    disconnectAll(io);
+  });
+
   socket.on("forceRecrack", () => {
-    // Backward compatibility: still trigger a single crack attempt
     forceRecrack(io);
   });
 
   socket.on("toggleSwarm", () => {
     toggleSwarm(io);
+  });
+
+  socket.on("addMoreBots", (config) => {
+    addMoreBots(config, io);
   });
 
   socket.on("manual2FA", (seq) => {
