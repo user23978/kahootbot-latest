@@ -50,7 +50,7 @@ io.on("connection", (socket) => {
 
 // ── Start ──
 const PORT = process.env.PORT || 3000;
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`\n  🎮 Kahoot Bot Control Panel`);
   console.log(`  ➜ http://localhost:${PORT}\n`);
 });
