@@ -42,17 +42,12 @@ export async function stopBots(io) {
   const toKill = bots;
   bots = [];
   for (const bot of toKill) {
-    if (bot) {
-      bot._aborted = true;
-      try { if (typeof bot.leave === "function") bot.leave(); } catch {}
-    }
+    try { if (typeof bot.leave === "function") bot.leave(); } catch {}
   }
   // Safety timeout to force-close sockets after leave packet sends
   setTimeout(() => {
     for (const bot of toKill) {
-      if (bot) {
-        try { if (bot.socket) bot.socket.close(); } catch {}
-      }
+      try { if (bot.socket) bot.socket.close(); } catch {}
     }
   }, 1000);
 
@@ -211,15 +206,13 @@ async function resumeDeployment(io) {
   }
 
   // Spawn any unspawned placeholder bots
-  (async () => {
-    for (let i = 0; i < totalCount; i++) {
-      if (!running || running === "paused") break;
-      if (bots[i] && bots[i]._isPlaceholder) {
-        spawnBot(i);
-        await delay(50);
-      }
+  for (let i = 0; i < totalCount; i++) {
+    if (!running || running === "paused") break;
+    if (bots[i] && bots[i]._isPlaceholder) {
+      spawnBot(i);
+      await delay(globalJoinDelay);
     }
-  })();
+  }
 
   if (running === true) {
     io.emit("log", { type: "info", msg: "[+] All spawn commands sent (resumed)." });
@@ -339,17 +332,15 @@ export async function startBots(config, io) {
   io.emit("log", { type: "info", msg: `[i] Spawning ${botCount} bots with ${globalJoinDelay}ms delay...` });
 
   // Spawn loop
-  (async () => {
-    for (let i = 0; i < botCount; i++) {
-      if (!running) break;
-      if (running === "paused") {
-        io.emit("log", { type: "warn", msg: "[!] Deployment paused (2FA reset)..." });
-        return;
-      }
-      spawnBot(i);
-      await delay(50); // Small stagger to prevent CPU/network spikes
+  for (let i = 0; i < botCount; i++) {
+    if (!running) break;
+    if (running === "paused") {
+      io.emit("log", { type: "warn", msg: "[!] Deployment paused (2FA reset)..." });
+      return;
     }
-  })();
+    spawnBot(i);
+    await delay(globalJoinDelay);
+  }
 
   if (running === true) {
     io.emit("log", { type: "info", msg: `[+] All ${botCount} spawn commands sent.` });
@@ -395,12 +386,7 @@ function spawnBot(i, retries = 0) {
     }
   }, 10000);
 
-  bot.join(globalGamePin, bot._botName).then(() => {
-    if (bot._aborted || !running) {
-      try { bot.leave(); } catch {}
-      try { if (bot.socket) bot.socket.close(); } catch {}
-    }
-  }).catch(() => {
+  bot.join(globalGamePin, bot._botName).catch(() => {
     clearTimeout(joinWatchdog);
     if (!running) {
       try { if (bot.socket) bot.socket.close(); } catch {}
