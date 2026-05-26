@@ -1,0 +1,12 @@
+{
+  "type": "module",
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "cli-progress": "^3.12.0",
+    "express": "^5.2.1",
+    "kahoot.js-latest": "^1.0.9",
+    "prompts": "^2.4.2",
+    "puppeteer": "^25.0.4",
+    "socket.io": "^4.8.3"
+  }
+}

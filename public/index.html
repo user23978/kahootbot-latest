@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="de">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Kahoot Bot — Control Panel</title>
+  <meta name="description" content="Kahoot Bot Control Panel with automated 2FA bypass">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+
+<body>
+
+  <div class="app">
+    <!-- ═══ Header ═══ -->
+    <header class="header">
+      <div class="header-left">
+        <span class="logo-icon">[ ]</span>
+        <span class="logo">KAHOOT BOT</span>
+        <span class="version">v3.0 — by Leo</span>
+      </div>
+      <div class="header-stats">
+        <div class="stat">
+          <span class="stat-dot green"></span>
+          <span class="stat-value" id="stat-joined">0</span>
+          <span>Im Spiel</span>
+        </div>
+        <div class="stat">
+          <span class="stat-dot red"></span>
+          <span class="stat-value" id="stat-failed">0</span>
+          <span>Fehler</span>
+        </div>
+        <div class="stat">
+          <span class="stat-dot yellow"></span>
+          <span class="stat-value" id="stat-total">0</span>
+          <span>Gesamt</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- ═══ Sidebar ═══ -->
+    <aside class="sidebar">
+      <!-- Config Card -->
+      <div class="card">
+        <div class="card-title">Konfiguration</div>
+        <div class="field">
+          <label for="gamePin">Game PIN</label>
+          <input type="text" id="gamePin" placeholder="z.B. 1568989" maxlength="8" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="botCount">Anzahl Bots</label>
+          <input type="number" id="botCount" value="100" min="1" max="500">
+        </div>
+        <div class="field">
+          <label for="botPrefix">Bot Prefix</label>
+          <input type="text" id="botPrefix" value="Bot" placeholder="z.B. Bot">
+        </div>
+        <div class="field">
+          <label for="nameMode">Namen Modus</label>
+          <select id="nameMode">
+            <option value="prefix">Prefix (Bot_1, Bot_2...)</option>
+            <option value="random" selected>Zufällige Namen</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="joinDelay">Join Delay (ms)</label>
+          <input type="number" id="joinDelay" value="200" min="50" max="10000">
+        </div>
+        <div class="field">
+          <label for="answerMode">Antwort Modus</label>
+          <select id="answerMode">
+            <option value="random" selected>Random</option>
+            <option value="correct">Korrekt (wenn möglich)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- 2FA Status Card -->
+      <div class="card tfa-card">
+        <div class="card-title">2FA Bypass Status</div>
+        <div class="tfa-status idle" id="tfaStatus">
+          <span>⏸ Warte auf Start...</span>
+        </div>
+        <div class="tfa-progress" id="tfaProgressContainer" style="display:none;">
+          <div class="tfa-progress-bar" id="tfaProgressBar" style="width:0%"></div>
+        </div>
+        <div class="field" style="margin-top: 15px;">
+          <label style="font-size: 11px; opacity: 0.7; text-align: center;">Manuelle 2FA Eingabe</label>
+          <div class="k-shape-container">
+            <button class="k-shape k-red" onclick="addManualShape(0)">▲</button>
+            <button class="k-shape k-blue" onclick="addManualShape(1)">◆</button>
+            <button class="k-shape k-yellow" onclick="addManualShape(2)">●</button>
+            <button class="k-shape k-green" onclick="addManualShape(3)">■</button>
+          </div>
+          <div class="k-preview" id="manual2faPreview">
+            <span style="color:var(--text-muted);font-size:12px;">Keine Eingabe</span>
+          </div>
+          <div style="display: flex; gap: 8px; margin-top: 8px;">
+            <button class="btn btn-recrack" onclick="clearManual2FA()" style="flex: 1; background: transparent;">Löschen</button>
+            <button class="btn btn-recrack" onclick="sendManual2FA()" style="flex: 2; background: var(--text-primary); color: var(--bg-primary);">Senden</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Action Buttons -->
+      <div class="btn-group">
+        <button class="btn btn-start" id="btnStart" onclick="handleStart()">
+          ▶ Start
+        </button>
+        <button class="btn btn-recrack" id="btnRecrack" onclick="handleRecrack()" disabled>
+          Bypass 2FA
+        </button>
+        <button class="btn btn-stop" id="btnStop" onclick="handleStop()" disabled>
+          ⏹ Stop
+        </button>
+      </div>
+    </aside>
+
+    <!-- ═══ Main Content ═══ -->
+    <main class="main">
+      <!-- Bot Grid -->
+      <div class="bot-grid-container">
+        <div class="bot-grid-header">
+          <span class="bot-grid-title" id="botGridTitle">Bots</span>
+        </div>
+        <div class="bot-grid" id="botGrid">
+          <div class="empty-state" id="emptyState">
+            <div class="empty-state-icon">[-]</div>
+            <div class="empty-state-text">Keine Bots aktiv</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Log Panel -->
+      <div class="log-panel">
+        <div class="log-header">
+          <span class="log-title">Log</span>
+          <button class="log-clear" onclick="clearLog()">Löschen</button>
+        </div>
+        <div class="log-entries" id="logEntries">
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const socket = io();
+
+    // ── DOM refs ──
+    const $pin = document.getElementById('gamePin');
+    const $count = document.getElementById('botCount');
+    const $prefix = document.getElementById('botPrefix');
+    const $nameMode = document.getElementById('nameMode');
+    const $delay = document.getElementById('joinDelay');
+    const $answer = document.getElementById('answerMode');
+    const $btnStart = document.getElementById('btnStart');
+    const $btnRecrack = document.getElementById('btnRecrack');
+    const $btnStop = document.getElementById('btnStop');
+    const $botGrid = document.getElementById('botGrid');
+    const $emptyState = document.getElementById('emptyState');
+    const $logEntries = document.getElementById('logEntries');
+    const $tfaStatus = document.getElementById('tfaStatus');
+    const $tfaProgressContainer = document.getElementById('tfaProgressContainer');
+    const $tfaProgressBar = document.getElementById('tfaProgressBar');
+    const $gridTitle = document.getElementById('botGridTitle');
+
+    // ── State ──
+    let isRunning = false;
+
+    // ── Actions ──
+    function handleStart() {
+      const pin = $pin.value.trim();
+      if (!/^\d{6,8}$/.test(pin)) {
+        addLog('error', 'Ungültiger PIN! Muss 6-8 Ziffern sein.');
+        $pin.focus();
+        return;
+      }
+
+      const config = {
+        gamePin: pin,
+        botCount: parseInt($count.value) || 100,
+        botPrefix: $prefix.value.trim() || 'Bot',
+        botNames: $nameMode.value === 'random' ? [] : [],
+        joinDelay: parseInt($delay.value) || 200,
+        answerMode: $answer.value,
+        nameMode: $nameMode.value
+      };
+
+      // Generate random names server-side if needed
+      if ($nameMode.value === 'random') {
+        config.botNames = []; // empty = server generates random
+      }
+
+      isRunning = true;
+      $btnStart.disabled = true;
+      $btnStop.disabled = false;
+      $btnRecrack.disabled = false;
+      $botGrid.innerHTML = '';
+      $emptyState && $emptyState.remove();
+
+      // Reset stats
+      document.getElementById('stat-joined').textContent = '0';
+      document.getElementById('stat-failed').textContent = '0';
+      document.getElementById('stat-total').textContent = config.botCount;
+
+      // Reset 2FA
+      setTfaStatus('idle', '⏸ Wird geprüft...');
+
+      socket.emit('start', config);
+      addLog('info', `Starte ${config.botCount} Bots für PIN ${config.gamePin}...`);
+    }
+
+    function handleStop() {
+      socket.emit('stop');
+      isRunning = false;
+      $btnStart.disabled = false;
+      $btnStop.disabled = true;
+      $btnRecrack.disabled = true;
+      addLog('warn', 'Stop-Signal gesendet...');
+    }
+
+    function handleRecrack() {
+      if (isRunning) {
+        socket.emit('toggleSwarm');
+      }
+    }
+
+    let manualSequence = [];
+
+    function addManualShape(shapeId) {
+      if(manualSequence.length < 4) {
+        manualSequence.push(shapeId);
+        updateManualPreview();
+      }
+    }
+
+    function clearManual2FA() {
+      manualSequence = [];
+      updateManualPreview();
+    }
+
+    function updateManualPreview() {
+      const colors = ['#e21b3c', '#1368ce', '#d89e00', '#26890c'];
+      const preview = document.getElementById('manual2faPreview');
+      preview.innerHTML = '';
+      if(manualSequence.length === 0) {
+        preview.innerHTML = '<span style="color:var(--text-muted);font-size:12px;">Keine Eingabe</span>';
+      } else {
+        manualSequence.forEach(s => {
+          const dot = document.createElement('div');
+          dot.className = 'k-preview-dot';
+          dot.style.background = colors[s];
+          preview.appendChild(dot);
+        });
+      }
+    }
+
+    function sendManual2FA() {
+      if (!isRunning) return;
+      if(manualSequence.length === 4) {
+        socket.emit('manual2FA', manualSequence);
+        addLog('info', `Manuelle 2FA gesendet: [${manualSequence}]`);
+        clearManual2FA();
+      } else {
+        addLog('error', 'Ungültig: Bitte genau 4 Symbole wählen!');
+      }
+    }
+
+    // ── Socket Events ──
+
+    socket.on('log', (data) => {
+      addLog(data.type, data.msg);
+    });
+
+    socket.on('stats', (data) => {
+      document.getElementById('stat-joined').textContent = data.joined;
+      document.getElementById('stat-failed').textContent = data.failed;
+      document.getElementById('stat-total').textContent = data.total;
+    });
+
+    socket.on('botUpdate', (data) => {
+      updateBotCell(data.index, data.name, data.status);
+    });
+
+    socket.on('tfaStatus', (data) => {
+      switch (data.phase) {
+        case 'probing':
+          setTfaStatus('probing', '🔍 Prüfe auf 2FA...');
+          break;
+        case 'probed':
+          if (data.has2FA) {
+            setTfaStatus('cracking', '🔐 2FA erkannt!');
+          } else {
+            setTfaStatus('idle', '✅ Kein 2FA');
+          }
+          break;
+        case 'cracking':
+          setTfaStatus('cracking', `⚡ Cracking... (${data.progress || 0}/24 Bots)`);
+          $tfaProgressContainer.style.display = 'block';
+          $tfaProgressBar.style.width = `${((data.progress || 0) / 24) * 100}%`;
+          break;
+        case 'cracked':
+          setTfaStatus('cracked', `✅ Geknackt: `);
+          $tfaStatus.innerHTML += `<span class="tfa-sequence">[${data.sequence}]</span>`;
+          $tfaProgressContainer.style.display = 'none';
+          break;
+        case 'error':
+          setTfaStatus('error', '❌ 2FA Fehler');
+          $tfaProgressContainer.style.display = 'none';
+          break;
+      }
+    });
+
+    socket.on('state', (data) => {
+      isRunning = data.running;
+      $btnStart.disabled = data.running;
+      $btnStop.disabled = !data.running;
+      $btnRecrack.disabled = !data.running;
+    });
+
+    // ── UI Helpers ──
+
+    function setTfaStatus(className, html) {
+      $tfaStatus.className = 'tfa-status ' + className;
+      $tfaStatus.innerHTML = (className === 'probing' || className === 'cracking')
+        ? `<div class="tfa-spinner"></div><span>${html}</span>`
+        : `<span>${html}</span>`;
+    }
+
+    function updateBotCell(index, name, status) {
+      let cell = document.getElementById(`bot-${index}`);
+      if (!cell) {
+        cell = document.createElement('div');
+        cell.id = `bot-${index}`;
+        cell.className = 'bot-cell';
+        $botGrid.appendChild(cell);
+      }
+
+      const statusLabels = {
+        joining: 'Joining',
+        ingame: 'Im Spiel',
+        error: 'Fehler',
+        '2fa_failed': '2FA Fehler',
+        disconnected: 'Offline'
+      };
+
+      cell.className = `bot-cell ${status.replace('2fa_failed', 'two_fa_failed')}`;
+      cell.innerHTML = `
+      <span class="bot-name" title="${name}">${name}</span>
+      <span class="bot-badge">${statusLabels[status] || status}</span>
+    `;
+
+      $gridTitle.textContent = `Bots (${$botGrid.children.length})`;
+    }
+
+    function addLog(type, msg) {
+      const now = new Date();
+      const time = now.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${type}`;
+      entry.innerHTML = `<span class="log-time">${time}</span>${escapeHtml(msg)}`;
+      $logEntries.appendChild(entry);
+
+      // Auto-scroll
+      $logEntries.scrollTop = $logEntries.scrollHeight;
+
+      // Limit to 500 entries
+      while ($logEntries.children.length > 500) {
+        $logEntries.removeChild($logEntries.firstChild);
+      }
+    }
+
+    function clearLog() {
+      $logEntries.innerHTML = '';
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // ── Keyboard shortcut ──
+    $pin.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !isRunning) handleStart();
+    });
+  </script>
+
+</body>
+
+</html>
