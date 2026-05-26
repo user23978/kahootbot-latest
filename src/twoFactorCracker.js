@@ -125,11 +125,10 @@ export async function crack2FA(gamePin, io) {
               try { b.leave(); } catch { }
             }
           }
-          // Leave the winner too after a short delay
-          setTimeout(() => {
-            try { bot.leave(); } catch { }
-          }, 1000);
-
+          
+          // DO NOT let the winner leave. It will stay in the game!
+          // This helps verify that the crack actually worked.
+          
           resolve(perm);
         });
 
