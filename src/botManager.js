@@ -37,18 +37,20 @@ export function getState() {
 
 export async function stopBots(io) {
   running = false;
-  swarmActive = false;
-  swarmLoopId = null;
-  abortSwarm();
+  // ONLY stop deployed bots! Leave scout and swarm running.
 
   const toKill = bots;
   bots = [];
   for (const bot of toKill) {
     try { if (typeof bot.leave === "function") bot.leave(); } catch {}
-    try { if (bot.socket) bot.socket.close(); } catch {}
   }
+  // Safety timeout to force-close sockets after leave packet sends
+  setTimeout(() => {
+    for (const bot of toKill) {
+      try { if (bot.socket) bot.socket.close(); } catch {}
+    }
+  }, 1000);
 
-  currentSequence = null;
   joinedCount = 0;
   failedCount = 0;
   totalCount = 0;
@@ -69,7 +71,6 @@ export async function disconnectAll(io) {
   bots = [];
   for (const bot of toKill) {
     try { if (typeof bot.leave === "function") bot.leave(); } catch {}
-    try { if (bot.socket) bot.socket.close(); } catch {}
   }
   // Safety: force-close any lingering sockets after 1s
   setTimeout(() => {
@@ -373,6 +374,7 @@ function spawnBot(i, retries = 0) {
   const joinWatchdog = setTimeout(() => {
     if (bot._status === "joining" && running) {
       try { bot.leave(); } catch { }
+      try { if (bot.socket) bot.socket.close(); } catch {}
       if (retries < 3) {
         setBotStatus(i, "retry", io);
         setTimeout(() => { if (running) spawnBot(i, retries + 1); }, globalJoinDelay);
@@ -386,6 +388,10 @@ function spawnBot(i, retries = 0) {
 
   bot.join(globalGamePin, bot._botName).catch(() => {
     clearTimeout(joinWatchdog);
+    if (!running) {
+      try { if (bot.socket) bot.socket.close(); } catch {}
+      return;
+    }
     if (bot._status !== "ingame" && running) {
       if (retries < 3) {
         setBotStatus(i, "retry", io);
@@ -400,7 +406,11 @@ function spawnBot(i, retries = 0) {
 
   bot.on("Joined", (settings) => {
     clearTimeout(joinWatchdog);
-    if (!running) return;
+    if (!running) {
+      try { bot.leave(); } catch {}
+      try { if (bot.socket) bot.socket.close(); } catch {}
+      return;
+    }
 
     if (settings.twoFactorAuth) {
       bot._waitingFor2FA = true;
