@@ -226,9 +226,13 @@ export async function crack2FA(gamePin, io) {
           onCracked(perm);
         });
 
-        bot.on("TwoFactorWrong", () => { });
+        bot.on("TwoFactorWrong", () => {
+          bot._swarmAborted = true;
+          try { bot.leave(); } catch {}
+          try { if (bot.socket) bot.socket.close(); } catch {}
+        });
 
-        await delay(200);
+        await delay(300);
       }
     })().catch((err) => {
       if (!swarmDone) {
